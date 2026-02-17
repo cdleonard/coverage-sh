@@ -6,10 +6,10 @@ authors = [
     { name = "Kilian Lackhove", email = "kilian@lackhove.de" }
 ]
 dependencies = [
-    "coverage==7.4.0",
-    "python-magic==0.4.27",
-    "tree-sitter-languages==1.9.1",
-    "tree-sitter==0.20.0",
+    "coverage>=7.3.3",
+    "python-magic>=0.4.27",
+    "tree-sitter>=0.22.0",
+    "tree-sitter-bash",
 ]
 readme = "README.md"
 requires-python = ">= 3.10"
@@ -37,7 +37,6 @@ dev = [
     "mypy==1.9.0",
     "pytest>=7.4.3",
     "setuptools>=69.0.2",
-    "types-tree-sitter-languages>=1.10.0.20240201",
 ]
 
 [tool.hatch.metadata]

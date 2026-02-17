@@ -20,8 +20,9 @@ from typing import TYPE_CHECKING, Any
 
 import coverage
 import magic
+import tree_sitter_bash
 from coverage import CoveragePlugin, FileReporter, FileTracer
-from tree_sitter_languages import get_parser
+from tree_sitter import Language, Parser
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -61,7 +62,7 @@ class ShellFileReporter(FileReporter):
         self.path = Path(filename)
         self._content: str | None = None
         self._executable_lines: set[int] = set()
-        self._parser = get_parser("bash")
+        self._parser = Parser(Language(tree_sitter_bash.language()))
 
     def source(self) -> str:
         if self._content is None:
