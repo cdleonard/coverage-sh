@@ -1,7 +1,5 @@
 #  SPDX-License-Identifier: MIT
 #  Copyright (c) 2023-2024 Kilian Lackhove
-from __future__ import annotations
-
 import json
 import re
 import subprocess
@@ -11,11 +9,11 @@ from collections import defaultdict
 from pathlib import Path
 from socket import gethostname
 from time import sleep
+from typing import cast
 
 import coverage
 import pytest
 
-from coverage_sh import ShellPlugin
 from coverage_sh.plugin import (
     CoverageParserThread,
     CoverageWriter,
@@ -24,6 +22,7 @@ from coverage_sh.plugin import (
     MonitorThread,
     PatchedPopen,
     ShellFileReporter,
+    ShellPlugin,
     filename_suffix,
 )
 
@@ -143,56 +142,40 @@ def syntax_example_path(resources_dir, tmp_path):
 
 
 @pytest.mark.parametrize("cover_always", [(True), (False)])
-def test_end2end(dummy_project_dir, monkeypatch, cover_always: bool):
+def test_end2end(
+    dummy_project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cover_always: bool,
+) -> None:
     monkeypatch.chdir(dummy_project_dir)
 
-    coverage_file_path = dummy_project_dir.joinpath(".coverage")
+    coverage_file_path = Path(".coverage")
     assert not coverage_file_path.is_file()
 
     if cover_always:
-        pyproject_file = dummy_project_dir.joinpath("pyproject.toml")
+        pyproject_file = Path("pyproject.toml")
         with pyproject_file.open("a") as fd:
             fd.write("\n[tool.coverage.coverage_sh]\ncover_always = true")
 
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "coverage", "run", "main.py"],
-            cwd=dummy_project_dir,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=2,
-        )
-    except subprocess.TimeoutExpired as e:  # pragma: no cover
-        assert e.stdout == "failed stdout"  # noqa: PT017
-        assert e.stderr == "failed stderr"  # noqa: PT017
-        assert False
+    proc = subprocess.run(
+        [sys.executable, "-m", "coverage", "run", "main.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=2,
+    )
     assert proc.stderr == ""
     assert proc.stdout == SYNTAX_EXAMPLE_STDOUT
-    assert proc.returncode == 0
 
-    assert dummy_project_dir.joinpath(".coverage").is_file()
-    assert len(list(dummy_project_dir.glob(f".coverage.sh.{gethostname()}.*"))) == 1
+    assert Path(".coverage").is_file()
+    assert len(list(Path().glob(f".coverage.sh.{gethostname()}.*"))) == 1
 
-    proc = subprocess.run(
-        [sys.executable, "-m", "coverage", "combine"],
-        cwd=dummy_project_dir,
-        check=False,
-    )
-    print("recombined")
-    assert proc.returncode == 0
+    subprocess.check_call([sys.executable, "-m", "coverage", "combine"])
+    subprocess.check_call([sys.executable, "-m", "coverage", "html"])
 
-    proc = subprocess.run(
-        [sys.executable, "-m", "coverage", "html"], cwd=dummy_project_dir, check=False
-    )
-    assert proc.returncode == 0
+    subprocess.check_call([sys.executable, "-m", "coverage", "json"])
 
-    proc = subprocess.run(
-        [sys.executable, "-m", "coverage", "json"], cwd=dummy_project_dir, check=False
-    )
-    assert proc.returncode == 0
-
-    coverage_json = json.loads(dummy_project_dir.joinpath("coverage.json").read_text())
+    coverage_json = json.loads(Path("coverage.json").read_text())
     assert coverage_json["files"]["test.sh"]["executed_lines"] == [8, 9]
     assert coverage_json["files"]["syntax_example.sh"]["excluded_lines"] == []
     assert (
@@ -285,16 +268,16 @@ class TestCoverageParserThread:
             print("writer done")
 
     class CovLineParserSpy(CovLineParser):
-        def __init__(self):
+        def __init__(self) -> None:
             super().__init__()
-            self.recorded_lines = []
+            self.recorded_lines: list[str] = []
 
         def _report_lines(self, lines: list[str]) -> None:
             self.recorded_lines.extend(lines)
             super()._report_lines(lines)
 
     class CovWriterFake:
-        def __init__(self):
+        def __init__(self) -> None:
             self.line_data: LineData = defaultdict(set)
 
         def write(self, line_data: LineData) -> None:
@@ -304,7 +287,7 @@ class TestCoverageParserThread:
         parser = self.CovLineParserSpy()
         writer = self.CovWriterFake()
         parser_thread = CoverageParserThread(
-            coverage_writer=writer,
+            coverage_writer=cast("CoverageWriter", writer),
             name="CoverageParserThread",
             parser=parser,
         )
@@ -394,7 +377,9 @@ class TestPatchedPopen:
         if cov is not None:  # pragma: no cover
             cov.stop()
 
+        assert proc.stderr is not None
         assert proc.stderr.read() == ""
+        assert proc.stdout is not None
         assert proc.stdout.read() == SYNTAX_EXAMPLE_STDOUT
 
 
@@ -412,7 +397,8 @@ class TestMonitorThread:
         parser_thread.start()
 
         monitor_thread = MonitorThread(
-            parser_thread=parser_thread, main_thread=self.MainThreadStub()
+            parser_thread=parser_thread,
+            main_thread=cast("threading.Thread", self.MainThreadStub()),
         )
         monitor_thread.start()
 
