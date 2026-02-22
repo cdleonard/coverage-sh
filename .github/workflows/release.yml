@@ -1,13 +1,12 @@
-name: "Release"
+name: release
 
 on:
-  push:
-    tags:
-      # Publish on any tag starting with a `v`, e.g., v0.1.0
-      - v*
+  release:
+    types: [ published ]
 
 jobs:
-  run:
+  release_to_pypi:
+    name: Release to PyPI
     runs-on: ubuntu-latest
     environment:
       name: pypi
