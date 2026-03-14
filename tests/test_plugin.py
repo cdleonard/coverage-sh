@@ -325,6 +325,15 @@ class TestShellFileReporter:
         assert reporter.translate_lines([67, 68]) == {67}
         assert reporter.translate_lines([69, 70, 71]) == {69}
 
+    def test_translate_multi_line_separate(self, resources_dir: Path) -> None:
+        script_path = resources_dir.joinpath("test_multi_line.sh")
+        reporter = ShellFileReporter(str(script_path))
+        assert reporter.lines() == {3, 4, 6, 9}
+        assert reporter.translate_lines([3]) == {3}
+        assert reporter.translate_lines([4, 5]) == {4}
+        assert reporter.translate_lines([6, 7, 8]) == {6}
+        assert reporter.translate_lines([9, 10, 11, 12]) == {9}
+
 
 def test_filename_suffix_should_match_pattern() -> None:
     suffix = filename_suffix()
