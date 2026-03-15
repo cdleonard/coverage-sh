@@ -86,6 +86,7 @@ class ShellFileReporter(FileReporter):
         self.path = Path(filename)
         self._content: str | None = None
         self._executable_lines: set[int] = set()
+        self._arcs: set[tuple[int, int]] = set()
         self._translate_lines: dict[int, int] = {}
         self._parser = Parser(Language(tree_sitter_bash.language()))
 
@@ -100,7 +101,12 @@ class ShellFileReporter(FileReporter):
 
         return self._content
 
-    def _parse_ast(self, node: Node) -> None:
+    def _parse_ast(
+        self,
+        node: Node,
+        executable_parent: Node | None = None,
+        previous_executable: Node | None = None,
+    ) -> Node | None:
         if node.is_named and node.type in EXECUTABLE_NODE_TYPES:
             sline = node.start_point.row + 1
             eline = node.end_point.row + 1
@@ -110,20 +116,59 @@ class ShellFileReporter(FileReporter):
                 for index in range(sline + 1, eline + 1):
                     self._translate_lines[index] = sline
 
-        for child in node.children:
-            self._parse_ast(child)
+            if previous_executable is None:
+                # first executable node in the script
+                self._arcs.add((0, sline))
+            else:
+                self._arcs.add((previous_executable.start_point.row + 1, sline))
 
-    def lines(self) -> set[TLineNo]:
+            executable_parent = node
+            previous_executable = node
+
+        for child in node.children:
+            if node.type == "function_definition":
+                # Function bodies are independent arc graphs: arcs inside the
+                # body must not connect to the call-site context, and the
+                # call-site context must not be affected by what happens inside.
+                self._parse_ast(
+                    child,
+                    executable_parent=node,
+                    previous_executable=None,
+                )
+            else:
+                previous_executable = self._parse_ast(
+                    child,
+                    executable_parent=executable_parent,
+                    # Each direct child of an executable node starts fresh from
+                    # that node, so alternative branches (e.g. else) arc from
+                    # the parent rather than from the last sibling branch.
+                    previous_executable=node
+                    if node is executable_parent
+                    else previous_executable,
+                )
+
+        return previous_executable
+
+    def _ensure_parsed(self) -> None:
+        if self._executable_lines:
+            return  # already parsed
         tree = self._parser.parse(self.source().encode("utf-8"))
         self._parse_ast(tree.root_node)
 
+    def lines(self) -> set[TLineNo]:
+        self._ensure_parsed()
         return self._executable_lines
 
     def translate_lines(self, input_lines: Iterable[TLineNo]) -> set[TLineNo]:
+        self._ensure_parsed()
         result: set[TLineNo] = set()
         for index in input_lines:
             result.add(self._translate_lines.get(index, index))
         return result
+
+    def arcs(self) -> set[tuple[TLineNo, TLineNo]]:
+        self._ensure_parsed()
+        return {(src, dst) for src, dst in self._arcs if src != dst}
 
 
 def filename_suffix() -> str:

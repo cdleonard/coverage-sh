@@ -100,9 +100,7 @@ def test_end2end(
     monkeypatch: pytest.MonkeyPatch,
     cover_always: bool,
 ) -> None:
-    test_sh = tmp_path / "test.sh"
-    test_sh.write_text("#!/bin/bash\necho hello\n")
-    test_sh.chmod(0o755)
+    test_sh = Path(__file__).parent / "resources" / "syntax_example.sh"
 
     pyproject_toml = tmp_path / "pyproject.toml"
     pyproject_toml.write_text(
@@ -110,7 +108,7 @@ def test_end2end(
     )
 
     main_py = tmp_path / "main.py"
-    main_py.write_text("import subprocess\nsubprocess.run(['./test.sh'])\n")
+    main_py.write_text(f"import subprocess\nsubprocess.run(['{test_sh}'])\n")
 
     if cover_always:
         with pyproject_toml.open("a") as fd:
@@ -257,6 +255,45 @@ class TestShellFileReporter:
         script.write_text(f"#!/bin/bash\n{script_body}")
         reporter = ShellFileReporter(str(script))
         assert reporter.lines() == expected_lines
+
+    @pytest.mark.parametrize(
+        ("script_body", "expected_arcs"),
+        [
+            pytest.param(
+                "echo one\necho two\necho three\n",
+                {(0, 2), (2, 3), (3, 4)},
+                id="sequential",
+            ),
+            pytest.param(
+                "if true; then\n  echo yes\nelse\n  echo no\nfi\n",
+                {(0, 2), (2, 3), (2, 5)},
+                id="if_else",
+            ),
+            pytest.param(
+                "if true; then\n  echo yes\nfi\necho after\n",
+                {(0, 2), (2, 3), (2, 5)},
+                id="if_no_else",
+            ),
+            pytest.param(
+                "for i in 1 2; do\n  echo $i\ndone\necho after\n",
+                {(0, 2), (2, 3), (3, 5)},
+                id="for_loop",
+            ),
+            pytest.param(
+                "echo before\nfunction say_hello() {\n    echo hello\n    echo world\n}\nsay_hello\n",
+                {(0, 2), (0, 4), (2, 7), (4, 5)},
+                id="function_definition",
+            ),
+        ],
+    )
+    def test_arcs(
+        self, tmp_path: Path, script_body: str, expected_arcs: set[tuple[int, int]]
+    ) -> None:
+        # Each script has a shebang on line 1; the construct under test starts on line 2.
+        script = tmp_path / "script.sh"
+        script.write_text(f"#!/bin/bash\n{script_body}")
+        reporter = ShellFileReporter(str(script))
+        assert reporter.arcs() == expected_arcs
 
     def test_invalid_syntax_should_be_treated_as_executable(
         self, tmp_path: Path
