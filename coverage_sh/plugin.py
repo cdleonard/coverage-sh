@@ -55,6 +55,7 @@ EXECUTABLE_NODE_TYPES = {
     "list",
 }
 SUPPORTED_MIME_TYPES = {"text/x-shellscript"}
+MAX_BRANCH_EXITS = 2
 
 PLUGIN_DEBUG_OPTION = "shell"
 
@@ -87,8 +88,50 @@ class ShellFileReporter(FileReporter):
         self._content: str | None = None
         self._executable_lines: set[int] = set()
         self._arcs: set[tuple[int, int]] = set()
+        self._no_branch_lines: set[int] = set()
         self._translate_lines: dict[int, int] = {}
         self._parser = Parser(Language(tree_sitter_bash.language()))
+
+    def _is_exhaustive_if_statement(self, node: Node) -> bool:
+        """Return true when an if statement has an else branch.
+
+        We use this to detect control-flow nodes where all outcomes are handled
+        inside the block, so a direct fallthrough arc from the if header to the
+        next statement would be incorrect.
+        """
+        if node.type != "if_statement":
+            return False
+        return any(child.type == "else_clause" for child in node.children)
+
+    def _is_exhaustive_case_statement(self, node: Node) -> bool:
+        """Return true when a case statement has a default ``*)`` pattern.
+
+        Tree-sitter exposes case patterns as ``case_item`` children. A default
+        arm is represented by an ``extglob_pattern`` node with text ``*``.
+        """
+        if node.type != "case_statement":
+            return False
+
+        for child in node.children:
+            if child.type != "case_item":
+                continue
+
+            first_named_child = next(
+                (
+                    case_item_child
+                    for case_item_child in child.children
+                    if case_item_child.is_named
+                ),
+                None,
+            )
+            if (
+                first_named_child is not None
+                and first_named_child.type == "extglob_pattern"
+                and first_named_child.text == b"*"
+            ):
+                return True
+
+        return False
 
     def source(self) -> str:
         if self._content is None:
@@ -107,45 +150,74 @@ class ShellFileReporter(FileReporter):
         executable_parent: Node | None = None,
         previous_executable: Node | None = None,
     ) -> Node | None:
+        # For exhaustive control nodes (if+else / case+*), we keep track of the
+        # last executable statement reached in any branch so callers can chain
+        # control-flow from inside the block, not from the header line.
+        exhaustive_control = False
+        branch_last_executable: Node | None = previous_executable
+
         if node.is_named and node.type in EXECUTABLE_NODE_TYPES:
             sline = node.start_point.row + 1
             eline = node.end_point.row + 1
             self._executable_lines.add(sline)
+
+            exhaustive_control = self._is_exhaustive_if_statement(
+                node
+            ) or self._is_exhaustive_case_statement(node)
+
             # for multi-line commands translate to the first line
             if sline != eline and node.type == "command":
                 for index in range(sline + 1, eline + 1):
                     self._translate_lines[index] = sline
 
             if previous_executable is None:
-                # first executable node in the script
-                self._arcs.add((0, sline))
+                # first executable node in file / function
+                self._arcs.add((-1, sline))
             else:
                 self._arcs.add((previous_executable.start_point.row + 1, sline))
 
             executable_parent = node
             previous_executable = node
+            branch_last_executable = node
 
         for child in node.children:
             if node.type == "function_definition":
                 # Function bodies are independent arc graphs: arcs inside the
                 # body must not connect to the call-site context, and the
                 # call-site context must not be affected by what happens inside.
-                self._parse_ast(
+                func_last = self._parse_ast(
                     child,
                     executable_parent=node,
                     previous_executable=None,
                 )
+                if func_last is not None:
+                    self._arcs.add((func_last.start_point.row + 1, -1))
             else:
-                previous_executable = self._parse_ast(
+                child_last = self._parse_ast(
                     child,
                     executable_parent=executable_parent,
                     # Each direct child of an executable node starts fresh from
                     # that node, so alternative branches (e.g. else) arc from
                     # the parent rather than from the last sibling branch.
+                    # This avoids creating fake sequential arcs between sibling
+                    # branches that are mutually exclusive.
                     previous_executable=node
                     if node is executable_parent
                     else previous_executable,
                 )
+                previous_executable = child_last
+                if (
+                    node is executable_parent
+                    and child_last is not None
+                    and child_last is not node
+                ):
+                    branch_last_executable = child_last
+
+        if node is executable_parent and exhaustive_control:
+            # For exhaustive controls, returning the branch tail prevents a
+            # synthetic fallthrough arc from the control header to the next
+            # statement after the block.
+            return branch_last_executable
 
         return previous_executable
 
@@ -154,21 +226,82 @@ class ShellFileReporter(FileReporter):
             return  # already parsed
         tree = self._parser.parse(self.source().encode("utf-8"))
         self._parse_ast(tree.root_node)
+        self._collapse_multiway_exits()
+        if self._executable_lines:
+            self._arcs.add((max(self._executable_lines), -1))
+
+    def _collapse_multiway_exits(self) -> None:
+        """Collapse multi-way branch exits to binary form for HTML compatibility.
+
+        Coverage.py's HTML reporter has an assertion that each branch line has at
+        most one "long" annotation (the verbose description of a missing arc). This
+        assertion fails for shell scripts with multi-way branches like:
+
+            case $var in
+              a) echo A ;;
+              b) echo B ;;
+              c) echo C ;;
+              *) echo D ;;
+            esac
+
+        The AST parser produces a single branch line (the "case" keyword) with 4
+        exits to each case arm. When coverage reports missing branches, this creates
+        3 long annotations -> assertion failure.
+
+        Instead of modeling the case statement as one line with N exits, we collapse
+        it to a binary form: keep only the first and last exit destinations, and mark
+        the source line as "no branch" so coverage won't emit branch annotations.
+
+        Implementation:
+        - Scan all arcs to find source lines with > MAX_BRANCH_EXITS (2) destinations
+        - For each such line, keep only the min and max destination arcs
+        - Record the source line in _no_branch_lines so exit_counts still reports 2
+          but HTML won't annotate it as a multi-way branch
+        """
+        exits_by_line: dict[int, set[int]] = defaultdict(set)
+        for src, dst in self._arcs:
+            if src > 0 and dst > 0 and dst != src:
+                exits_by_line[src].add(dst)
+
+        for src, exits in exits_by_line.items():
+            if len(exits) <= MAX_BRANCH_EXITS:
+                continue
+
+            self._no_branch_lines.add(src)
+            sorted_exits = sorted(exits)
+            keep = {sorted_exits[0], sorted_exits[-1]}
+            self._arcs = {
+                (arc_src, arc_dst)
+                for arc_src, arc_dst in self._arcs
+                if arc_src != src or arc_dst <= 0 or arc_dst in keep
+            }
+
+    def no_branch_lines(self) -> set[TLineNo]:
+        self._ensure_parsed()
+        return self._no_branch_lines
 
     def lines(self) -> set[TLineNo]:
         self._ensure_parsed()
         return self._executable_lines
 
-    def translate_lines(self, input_lines: Iterable[TLineNo]) -> set[TLineNo]:
+    def translate_lines(self, lines: Iterable[TLineNo]) -> set[TLineNo]:
         self._ensure_parsed()
         result: set[TLineNo] = set()
-        for index in input_lines:
+        for index in lines:
             result.add(self._translate_lines.get(index, index))
         return result
 
     def arcs(self) -> set[tuple[TLineNo, TLineNo]]:
         self._ensure_parsed()
         return {(src, dst) for src, dst in self._arcs if src != dst}
+
+    def exit_counts(self) -> dict[TLineNo, int]:
+        self._ensure_parsed()
+        exits: dict[TLineNo, set[TLineNo]] = defaultdict(set)
+        for src, dst in self.arcs():
+            if src > 0:
+                exits[src].add(dst)
+        return {src: len(dsts) for src, dsts in exits.items() if len(dsts) > 1}
 
 
 def filename_suffix() -> str:

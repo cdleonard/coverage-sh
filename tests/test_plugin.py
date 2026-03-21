@@ -1,5 +1,7 @@
 #  SPDX-License-Identifier: MIT
 #  Copyright (c) 2023-2024 Kilian Lackhove
+from __future__ import annotations
+
 import asyncio
 import io
 import os
@@ -9,12 +11,11 @@ import subprocess
 import sys
 import threading
 from collections import defaultdict
-from collections.abc import Iterable
 from importlib.metadata import version
 from pathlib import Path
 from socket import gethostname
 from time import sleep
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import coverage
 import pytest
@@ -34,6 +35,9 @@ from coverage_sh.plugin import (
     debug_write,
     filename_suffix,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 COVERAGE_LINE_CHUNKS = (
     b"""\
@@ -100,7 +104,7 @@ def test_end2end(
     monkeypatch: pytest.MonkeyPatch,
     cover_always: bool,
 ) -> None:
-    test_sh = Path(__file__).parent / "resources" / "syntax_example.sh"
+    test_sh = Path(__file__).parent.parent / "example" / "syntax_example.sh"
 
     pyproject_toml = tmp_path / "pyproject.toml"
     pyproject_toml.write_text(
@@ -261,27 +265,32 @@ class TestShellFileReporter:
         [
             pytest.param(
                 "echo one\necho two\necho three\n",
-                {(0, 2), (2, 3), (3, 4)},
+                {(-1, 2), (2, 3), (3, 4), (4, -1)},
                 id="sequential",
             ),
             pytest.param(
                 "if true; then\n  echo yes\nelse\n  echo no\nfi\n",
-                {(0, 2), (2, 3), (2, 5)},
+                {(-1, 2), (2, 3), (2, 5), (5, -1)},
                 id="if_else",
             ),
             pytest.param(
+                "if true; then\n  echo yes\nelse\n  echo no\nfi\necho after\n",
+                {(-1, 2), (2, 3), (2, 5), (5, 7), (7, -1)},
+                id="if_else_with_following_statement",
+            ),
+            pytest.param(
                 "if true; then\n  echo yes\nfi\necho after\n",
-                {(0, 2), (2, 3), (2, 5)},
+                {(-1, 2), (2, 3), (2, 5), (5, -1)},
                 id="if_no_else",
             ),
             pytest.param(
                 "for i in 1 2; do\n  echo $i\ndone\necho after\n",
-                {(0, 2), (2, 3), (3, 5)},
+                {(-1, 2), (2, 3), (3, 5), (5, -1)},
                 id="for_loop",
             ),
             pytest.param(
                 "echo before\nfunction say_hello() {\n    echo hello\n    echo world\n}\nsay_hello\n",
-                {(0, 2), (0, 4), (2, 7), (4, 5)},
+                {(-1, 2), (-1, 4), (2, 7), (4, 5), (5, -1), (7, -1)},
                 id="function_definition",
             ),
         ],
@@ -294,6 +303,38 @@ class TestShellFileReporter:
         script.write_text(f"#!/bin/bash\n{script_body}")
         reporter = ShellFileReporter(str(script))
         assert reporter.arcs() == expected_arcs
+
+    def test_exit_counts_should_collapse_multiway_if_elif_branches(
+        self, tmp_path: Path
+    ) -> None:
+        script = tmp_path / "script.sh"
+        script.write_text(
+            "#!/bin/bash\n"
+            "if false; then\n"
+            "  echo if\n"
+            "elif false; then\n"
+            "  echo elif\n"
+            "else\n"
+            "  echo else\n"
+            "fi\n"
+        )
+        reporter = ShellFileReporter(str(script))
+        assert reporter.exit_counts() == {2: 2}
+        assert reporter.no_branch_lines() == {2}
+
+    def test_exit_counts_should_include_case_branches(self, tmp_path: Path) -> None:
+        script = tmp_path / "script.sh"
+        script.write_text(
+            "#!/bin/bash\n"
+            "case $x in\n"
+            "  a) echo A ;;\n"
+            "  b) echo B ;;\n"
+            "  *) echo D ;;\n"
+            "esac\n"
+        )
+        reporter = ShellFileReporter(str(script))
+        assert reporter.exit_counts() == {2: 2}
+        assert reporter.no_branch_lines() == {2}
 
     def test_invalid_syntax_should_be_treated_as_executable(
         self, tmp_path: Path
