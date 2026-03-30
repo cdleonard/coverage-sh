@@ -1,0 +1,16 @@
+[project]
+name = "coverage-sh-test-async"
+version = "0.0.0"
+dependencies = [
+    # vertical
+    "coverage-sh",
+    "pytest",
+    "pytest-cov",
+    "pytest-asyncio",
+]
+
+[tool.coverage.run]
+plugins = ["coverage_sh"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
