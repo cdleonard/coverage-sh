@@ -77,4 +77,4 @@ def test_multi_line(resources_dir: Path, tmp_path: Path) -> None:
     result = run_shell_collect(script_path, tmp_path)
     assert result.proc.stdout == out_text
     assert result.proc.returncode == 0
-    assert result.lines == {3, 4, 7, 10}
+    assert result.lines == {3, 4, 7, 10, 15, 17, 18, 19, 21, 22, 26, 27}
