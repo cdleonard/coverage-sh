@@ -1,5 +1,18 @@
 import asyncio
+import pytest
 import subprocess
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def setup() -> None:
+    import faulthandler
+    import signal
+
+    logger.info("can debug with SIGUSR1")
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 
 def test_sync_shell() -> None:
