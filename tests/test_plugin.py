@@ -24,6 +24,7 @@ from coverage.debug import DebugControl
 from packaging.version import Version
 
 from coverage_sh.plugin import (
+    ArcData,
     CoverageParserThread,
     CoverageWriter,
     CovLineParser,
@@ -41,12 +42,12 @@ if TYPE_CHECKING:
 
 COVERAGE_LINE_CHUNKS = (
     b"""\
-CCOV:::/home/dummy_user/dummy_dir_a:::1:::a normal line
-COV:::/home/dummy_user/dummy_dir_b:::10:::a line
+CCOV:::/home/dummy_user/dummy_dir_a:::1:::main:::a normal line
+COV:::/home/dummy_user/dummy_dir_b:::10:::main:::a line
 with a line fragment
 
-COV:::/home/dummy_user/dummy_dir_a:::2:::a  line with ::: triple columns
-COV:::/home/dummy_user/dummy_dir_a:::3:::a  line """,
+COV:::/home/dummy_user/dummy_dir_a:::2:::main:::a  line with ::: triple columns
+COV:::/home/dummy_user/dummy_dir_a:::3:::main:::a  line """,
     b"that spans multiple chunks\n",
     b"C",
     b"O",
@@ -58,19 +59,35 @@ COV:::/home/dummy_user/dummy_dir_a:::3:::a  line """,
     b"ho",
     b"m",
     b"e",
-    b"/dummy_user/dummy_dir_a:::4:::a chunked line",
+    b"/dummy_user/dummy_dir_a:::18:::some_func:::a chunked line\n",
+    b"COV:::/home/dummy_user/dummy_dir_a:::4:::main:::final line",
 )
 COVERAGE_LINES = [
-    "CCOV:::/home/dummy_user/dummy_dir_a:::1:::a normal line",
-    "COV:::/home/dummy_user/dummy_dir_b:::10:::a line",
+    "CCOV:::/home/dummy_user/dummy_dir_a:::1:::main:::a normal line",
+    "COV:::/home/dummy_user/dummy_dir_b:::10:::main:::a line",
     "with a line fragment",
-    "COV:::/home/dummy_user/dummy_dir_a:::2:::a  line with ::: triple columns",
-    "COV:::/home/dummy_user/dummy_dir_a:::3:::a  line that spans multiple chunks",
-    "COV:::/home/dummy_user/dummy_dir_a:::4:::a chunked line",
+    "COV:::/home/dummy_user/dummy_dir_a:::2:::main:::a  line with ::: triple columns",
+    "COV:::/home/dummy_user/dummy_dir_a:::3:::main:::a  line that spans multiple chunks",
+    "COV:::/home/dummy_user/dummy_dir_a:::18:::some_func:::a chunked line",
+    "COV:::/home/dummy_user/dummy_dir_a:::4:::main:::final line",
 ]
 COVERAGE_LINE_COVERAGE = {
-    "/home/dummy_user/dummy_dir_a": {1, 2, 3, 4},
+    "/home/dummy_user/dummy_dir_a": {1, 2, 3, 4, 18},
     "/home/dummy_user/dummy_dir_b": {10},
+}
+COVERAGE_ARC_COVERAGE = {
+    "/home/dummy_user/dummy_dir_a": {
+        (-1, 1),
+        (1, -1),
+        (-1, 2),
+        (2, 3),
+        (3, -1),
+        (-1, 18),
+        (18, -1),
+        (-1, 4),
+        (4, -1),
+    },
+    "/home/dummy_user/dummy_dir_b": {(-1, 10), (10, -1)},
 }
 
 END2END_SUBPROCESS_TIMEOUT = 5
@@ -402,6 +419,54 @@ class TestCovLineParser:
 
         assert parser.line_data == COVERAGE_LINE_COVERAGE
 
+    @pytest.mark.parametrize(
+        ("chunks", "expected_arcs"),
+        [
+            pytest.param(
+                COVERAGE_LINE_CHUNKS,
+                COVERAGE_ARC_COVERAGE,
+                id="chunked_lines",
+            ),
+            pytest.param(
+                (b"COV:::/path/a:::1:::x\nCOV:::/path/a:::2:::x\n",),
+                {"/path/a": {(-1, 1), (1, 2), (2, -1)}},
+                id="single_file_sequential",
+            ),
+            pytest.param(
+                (
+                    b"COV:::/path/a:::5:::x\nCOV:::/path/a:::3:::x\nCOV:::/path/a:::7:::x\n",
+                ),
+                {"/path/a": {(-1, 5), (5, 3), (3, 7), (7, -1)}},
+                id="single_file_non_sequential",
+            ),
+            pytest.param(
+                (
+                    b"COV:::/path/a:::5:::x\nCOV:::/path/b:::3:::x\nCOV:::/path/b:::7:::x\n",
+                ),
+                {
+                    "/path/a": {(-1, 5), (5, -1)},
+                    "/path/b": {(-1, 3), (3, 7), (7, -1)},
+                },
+                id="multi_file",
+            ),
+            pytest.param(
+                (b"COV:::/path/single:::1:::x\n",),
+                {"/path/single": {(-1, 1), (1, -1)}},
+                id="single_line_no_arcs",
+            ),
+        ],
+    )
+    def test_arcs_should_match_expected(
+        self, chunks: tuple[bytes, ...], expected_arcs: ArcData
+    ) -> None:
+        parser = CovLineParser()
+        for chunk in chunks:
+            parser.parse(chunk)
+        parser.flush()
+        parser.finalize()
+
+        assert parser.arc_data == expected_arcs
+
     def test_parse_should_raise_for_incomplete_line(self) -> None:
         parser = CovLineParser()
         with pytest.raises(ValueError, match="could not parse line"):
@@ -441,7 +506,12 @@ class TestCoverageParserThread:
         def __init__(self) -> None:
             self.line_data: LineData = defaultdict(set)
 
-        def write(self, line_data: LineData) -> None:
+        def write(
+            self,
+            line_data: LineData,
+            *,
+            arc_data: ArcData | None = None,  # noqa: ARG002
+        ) -> None:
             self.line_data.update(line_data)
 
     def test_lines_should_match_reference(self) -> None:

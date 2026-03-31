@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from tree_sitter import Node
 
 LineData = dict[str, set[int]]
+ArcData = dict[str, set[tuple[int, int]]]
 
 TMP_PATH = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))  # noqa: S108
 TRACEFILE_PREFIX = "shelltrace"
@@ -314,7 +315,11 @@ def filename_suffix() -> str:
 class CovLineParser:
     def __init__(self) -> None:
         self._last_line_fragment = ""
+        self._last_line = -1
+        self._last_path = ""
+        self._last_function = ""
         self.line_data: LineData = defaultdict(set)
+        self.arc_data: ArcData = defaultdict(set)
 
     def parse(self, buf: bytes) -> None:
         self._report_lines(list(self._buf_to_lines(buf)))
@@ -340,39 +345,75 @@ class CovLineParser:
                 continue
 
             try:
-                _, path_, lineno_, _ = line.split(":::", maxsplit=3)
+                path_, lineno_, func_ = self._parse_trace_line(line)
                 lineno = int(lineno_)
                 path = Path(path_).absolute()
             except ValueError as e:
                 raise ValueError(f"could not parse line {line}") from e
 
-            self.line_data[str(path)].add(lineno)
+            path_str = str(path)
+            self.line_data[path_str].add(lineno)
+
+            if self._last_path == "":
+                # first line ever
+                self.arc_data[path_str].add((-1, lineno))
+            elif path_str == self._last_path:
+                # same file
+                if func_ != self._last_function:
+                    # function scope changed
+                    self.arc_data[self._last_path].add((self._last_line, -1))
+                    self.arc_data[path_str].add((-1, lineno))
+                else:
+                    # same function
+                    self.arc_data[path_str].add((self._last_line, lineno))
+            else:
+                # different file
+                self.arc_data[self._last_path].add((self._last_line, -1))
+                self.arc_data[path_str].add((-1, lineno))
+
+            self._last_line = lineno
+            self._last_path = path_str
+            self._last_function = func_
+
+    def _parse_trace_line(self, line: str) -> tuple[str, str, str]:
+        _, path_, lineno_, func_ = line.split(":::", maxsplit=3)
+        func_ = func_.split(":::", 1)[0]
+        return (path_, lineno_, func_)
 
     def flush(self) -> None:
         self.parse(b"\n")
 
+    def finalize(self) -> None:
+        self.arc_data[self._last_path].add((self._last_line, -1))
+
 
 class CoverageWriter:
-    def __init__(self, coverage_data_path: Path):
+    def __init__(self, coverage_data_path: Path, *, branch: bool = False):
         # pytest-cov uses the COV_CORE_DATAFILE env var to configure the datafile base path
         coverage_data_env_var = os.environ.get("COV_CORE_DATAFILE")
         if coverage_data_env_var is not None:
             coverage_data_path = Path(coverage_data_env_var).absolute()
 
         self._coverage_data_path = coverage_data_path
+        self._branch = branch
 
-    def write(self, line_data: LineData) -> None:
+    def write(self, line_data: LineData, arc_data: ArcData | None = None) -> None:
         suffix_ = "sh." + filename_suffix()
         coverage_data = CoverageData(
             basename=self._coverage_data_path,
             suffix=suffix_,
-            # TODO: set warn, debug and no_disk
         )
 
         coverage_data.add_file_tracers(
             dict.fromkeys(line_data, "coverage_sh.ShellPlugin")
         )
-        coverage_data.add_lines(line_data)
+        if self._branch:
+            if arc_data:
+                for path, arcs in arc_data.items():
+                    if arcs:
+                        coverage_data.add_arcs({path: arcs})
+        else:
+            coverage_data.add_lines(line_data)
         coverage_data.write()
 
 
@@ -437,7 +478,11 @@ class CoverageParserThread(threading.Thread):
             sel.unregister(fifo)
             os.close(fifo)
 
-        self._coverage_writer.write(self._parser.line_data)
+        self._parser.finalize()
+
+        self._coverage_writer.write(
+            self._parser.line_data, arc_data=self._parser.arc_data
+        )
         with contextlib.suppress(FileNotFoundError):
             self.fifo_path.unlink()
 
@@ -449,7 +494,7 @@ def init_helper(fifo_path: Path) -> Path:
     helper_path = Path(TMP_PATH, f"coverage-sh.{filename_suffix()}.sh")
     helper_path.write_text(
         rf"""#!/bin/sh
-PS4="COV:::\${{BASH_SOURCE}}:::\${{LINENO}}:::"
+PS4="COV:::\${{BASH_SOURCE}}:::\${{LINENO}}:::\${{FUNCNAME[0]}}:::"
 exec {{BASH_XTRACEFD}}>>"{fifo_path!s}"
 export BASH_XTRACEFD
 set -x
@@ -463,6 +508,7 @@ set -x
 # ignore this for the time being
 class PatchedPopen(OriginalPopen):  # type: ignore[type-arg]
     data_file_path: Path = Path.cwd()
+    branch: bool = False
 
     def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
         if Coverage.current() is None:
@@ -478,7 +524,9 @@ class PatchedPopen(OriginalPopen):  # type: ignore[type-arg]
         kwargs.update(dict(zip(sig.parameters.keys(), args)))
 
         self._parser_thread = CoverageParserThread(
-            coverage_writer=CoverageWriter(coverage_data_path=self.data_file_path),
+            coverage_writer=CoverageWriter(
+                coverage_data_path=self.data_file_path, branch=self.branch
+            ),
             name="CoverageParserThread(None)",
         )
         self._parser_thread.start()
@@ -543,6 +591,21 @@ def _iterdir(path: Path) -> Iterator[Path]:
             yield from _iterdir(p)
 
 
+class ShellFileTracer(FileTracer):
+    def __init__(self, filename: str) -> None:
+        super().__init__(filename)  # type: ignore[call-arg]
+        self._reporter = ShellFileReporter(filename)
+
+    def source(self) -> str:
+        return self._reporter.source()
+
+    def source_token_lines(self) -> Iterable[object]:
+        return []  # pragma: no cover
+
+    def find_executable_statements(self, _source: str, _filename: str) -> set[int]:
+        return self._reporter.lines()
+
+
 class ShellPlugin(CoveragePlugin):
     def __init__(self, options: dict[str, Any]):
         self.options = options
@@ -551,6 +614,7 @@ class ShellPlugin(CoveragePlugin):
     def configure(self, config: TConfigurable) -> None:
         data_file_option = config.get_option("run:data_file")
         coverage_data_path = Path(cast("str", data_file_option)).absolute()
+        branch = bool(config.get_option("run:branch"))
 
         if config.get_option("run:core") == "sysmon" or (
             sys.version_info >= (3, 14) and config.get_option("run:core") is None
@@ -564,7 +628,7 @@ class ShellPlugin(CoveragePlugin):
 
         if self.options.get("cover_always", False):
             parser_thread = CoverageParserThread(
-                coverage_writer=CoverageWriter(coverage_data_path),
+                coverage_writer=CoverageWriter(coverage_data_path, branch=branch),
                 name=f"CoverageParserThread({coverage_data_path!s})",
             )
             parser_thread.start()
@@ -579,6 +643,7 @@ class ShellPlugin(CoveragePlugin):
             os.environ["ENV"] = str(self._helper_path)
         else:
             PatchedPopen.data_file_path = coverage_data_path
+            PatchedPopen.branch = branch
             # https://github.com/python/mypy/issues/1152
             subprocess.Popen = PatchedPopen  # type: ignore[misc]
 
@@ -591,8 +656,11 @@ class ShellPlugin(CoveragePlugin):
     def _is_relevant(path: Path) -> bool:
         return magic.from_file(path.resolve(), mime=True) in SUPPORTED_MIME_TYPES
 
-    def file_tracer(self, filename: str) -> FileTracer | None:  # noqa: ARG002
-        return None
+    def file_tracer(self, filename: str) -> FileTracer | None:
+        path = Path(filename)
+        if not path.exists() or not self._is_relevant(path):
+            return None
+        return ShellFileTracer(filename)
 
     def file_reporter(
         self,
