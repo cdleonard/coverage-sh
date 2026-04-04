@@ -147,6 +147,9 @@ END2END_STDOUT = SYNTAX_EXAMPLE_STDOUT + "Hello from inner python\n"
 #: lines executed inside inner.py
 INNER_PY_EXECUTED_LINES = [2]
 
+#: timeout for running end2end tests
+END2END_SUBPROCESS_TIMEOUT = 5
+
 
 class DebugControlString(DebugControl):
     """A `DebugControl` that writes to a StringIO, for testing."""
@@ -194,7 +197,7 @@ def test_end2end(
         capture_output=True,
         text=True,
         check=True,
-        timeout=2,
+        timeout=END2END_SUBPROCESS_TIMEOUT,
     )
 
     if sys.version_info < (3, 14):
@@ -313,7 +316,7 @@ patch = ["subprocess"]
         capture_output=True,
         text=True,
         check=True,
-        timeout=2,
+        timeout=END2END_SUBPROCESS_TIMEOUT,
     )
     if sys.version_info < (3, 14):
         # we raise a warning when sysmon run.core is set to sysmon, which is the default since 3.14
@@ -325,6 +328,35 @@ patch = ["subprocess"]
     assert (
         coverage_json["files"]["inner.py"]["executed_lines"] == INNER_PY_EXECUTED_LINES
     )
+
+
+def test_end2end_async_simple(dummy_project_dir: Path) -> None:
+    """
+    Test creating subprocess via asyncio
+
+    This used to hang without PatchedPopen.__del__ patching
+    """
+    argv = [sys.executable, "-m", "coverage", "run", "--parallel", "main_async.py"]
+    proc = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=END2END_SUBPROCESS_TIMEOUT,
+        cwd=str(dummy_project_dir),
+    )
+    assert proc.stdout == END2END_STDOUT
+    subprocess.check_call(
+        [sys.executable, "-m", "coverage", "combine"],
+        cwd=str(dummy_project_dir),
+    )
+    subprocess.check_call(
+        [sys.executable, "-m", "coverage", "json"],
+        cwd=str(dummy_project_dir),
+    )
+    coverage_json = json.loads(dummy_project_dir.joinpath("coverage.json").read_text())
+    assert coverage_json["files"]["main_async.py"]
+    assert coverage_json["files"]["test.sh"]["executed_lines"] == [8, 9, 10]
 
 
 class TestShellFileReporter:
@@ -535,6 +567,22 @@ class TestPatchedPopen:
         assert proc.stderr.read() == ""
         assert proc.stdout is not None
         assert proc.stdout.read() == END2END_STDOUT
+
+    def test_wait_poll_notyet(self) -> None:
+        proc = PatchedPopen(
+            ["/bin/bash", "-c", "read;echo $REPLY"],
+            stdout=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+        )
+        assert proc.poll() is None
+        with pytest.raises(subprocess.TimeoutExpired):
+            proc.wait(0.1)
+        out, err = proc.communicate(b"aaa")
+        assert out == b"aaa\n"
+        assert err is None
+        assert proc.returncode == 0
+        assert proc.poll() == 0
+        assert proc.wait() == 0
 
 
 class TestMonitorThread:
