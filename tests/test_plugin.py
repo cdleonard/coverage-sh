@@ -31,6 +31,8 @@ from coverage_sh.plugin import (
     PatchedPopen,
     ShellFileReporter,
     ShellPlugin,
+    _is_shell_script_filename,
+    _is_shell_script_header,
     debug_write,
     filename_suffix,
 )
@@ -600,6 +602,54 @@ class TestMonitorThread:
             main_thread=cast("threading.Thread", self.MainThreadStub()),
         )
         monitor_thread.start()
+
+
+class TestShellScriptDetection:
+    @pytest.mark.parametrize(
+        ("first_line", "expected"),
+        [
+            ("#!/bin/sh\n", True),
+            ("#!/bin/bash", True),
+            ("#!/usr/bin/env bash\n", True),
+            ("#!/bin/dash", True),
+            ("#!/usr/bin/env zsh\n", True),
+            ("#!/bin/busybox ash\n", True),
+            ("  #!  /bin/ksh  \n", True),
+            ("#!/usr/bin/python3", False),
+            ("#!/usr/bin/env python", False),
+            ("#!/usr/bin/env ruby", False),
+            ("def main(): pass\n", False),
+            ("import os\n", False),
+            ("from pathlib import Path\n", False),
+            ("class Spam:\n", False),
+            ("async def foo() -> None:\n", False),
+            ("echo 'no shebang'\n", None),
+            ("# just a comment\n", None),
+            ("set -euo pipefail\n", None),
+            ("", None),
+        ],
+    )
+    def test_is_shell_script_header(
+        self, first_line: str, expected: "bool | None"
+    ) -> None:
+        assert _is_shell_script_header(first_line) is expected
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            (Path("script.sh"), True),
+            (Path("setup.bash"), True),
+            (Path("Profile.zsh"), True),
+            (Path("foo.DASH"), True),
+            (Path("legacy.TCSH"), True),
+            (Path("module.py"), False),
+            (Path("README"), False),
+            (Path("archive.tar.gz"), False),
+            (Path("two-part.sh.bak"), False),
+        ],
+    )
+    def test_is_shell_script_filename(self, path: Path, expected: bool) -> None:
+        assert _is_shell_script_filename(path) is expected
 
 
 class TestShellPlugin:
