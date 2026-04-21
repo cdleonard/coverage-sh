@@ -272,6 +272,17 @@ class TestShellFileReporter:
                 {2, 5, 7},
                 id="func_paren",
             ),
+            pytest.param(
+                """\
+                {
+                    echo aaa
+                    # comment
+                    echo bbb
+                } | grep a
+                """,
+                {3, 5, 6},
+                id="long_pipeline",
+            ),
         ],
     )
     def test_executable_lines(
