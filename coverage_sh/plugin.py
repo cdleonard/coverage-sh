@@ -50,7 +50,6 @@ EXECUTABLE_NODE_TYPES = {
     "while_statement",
     "if_statement",
     "case_statement",
-    "pipeline",
     "list",
 }
 SUPPORTED_MIME_TYPES = {"text/x-shellscript"}
