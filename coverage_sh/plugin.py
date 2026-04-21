@@ -38,7 +38,6 @@ ArcData = dict[str, set[tuple[int, int]]]
 TMP_PATH = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))  # noqa: S108
 TRACEFILE_PREFIX = "shelltrace"
 EXECUTABLE_NODE_TYPES = {
-    "subshell",
     "redirected_statement",
     "variable_assignment",
     "variable_assignments",
@@ -52,7 +51,6 @@ EXECUTABLE_NODE_TYPES = {
     "while_statement",
     "if_statement",
     "case_statement",
-    "pipeline",
     "list",
 }
 SUPPORTED_MIME_TYPES = {"text/x-shellscript"}
